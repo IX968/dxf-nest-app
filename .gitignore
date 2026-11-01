@@ -1,0 +1,11 @@
+__pycache__/
+build/
+dist/
+_newbuild/
+_test/
+_build.log
+_cov.py
+_t.py
+*.spec
+*.dxf
+排版结果*
