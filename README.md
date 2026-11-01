@@ -40,4 +40,12 @@ pyinstaller --onefile --windowed --collect-binaries spyrrow --exclude-module mat
 - `nest_core.py`：读 DXF、识别零件、排版
 - `nest_post.py`：导出 DXF
 
-排版算法用的是 [spyrrow](https://pypi.org/project/spyrrow/)（sparrow 的 Python 版）。
+## 算法来源与致谢
+
+排版核心算法来自 **Jeroen Gardeyn** 的 [sparrow](https://github.com/JeroenGar/sparrow)（底层碰撞检测引擎是他的 [jagua-rs](https://github.com/JeroenGar/jagua-rs)），
+通过 **Paul Durand-Lupinski** 的 Python 接口 [spyrrow](https://github.com/PaulDL-RS/spyrrow) 调用。本项目在它之上做了零件识别、界面、多方案并行、回填和结果核对。
+感谢原作者的开源工作。各组件的许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## 许可证
+
+[MIT](LICENSE)
