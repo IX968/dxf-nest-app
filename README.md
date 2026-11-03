@@ -4,17 +4,18 @@
 
 ## 下载
 
-不想装 Python 的话，直接到右边 **Releases** 下载 `航模DXF排版_v0.1.6.exe`，双击运行（第一次启动要等几秒）。
+不想装 Python 的话，直接到右边 **Releases** 下载 `航模DXF排版_v0.2.0.exe`，双击运行（第一次启动要等几秒）。
 
 ## 能做什么
 
 - 导入一个或多个 DXF，自动识别零件（闭合轮廓、孔、镂空里的小件）；没闭合的轮廓会列出来让你处理。
 - 板材尺寸有常用预设（1000×100、900×900 等），也可以自定义；可设零件间距和板边距。
 - 排版时实时显示过程，同时用几种排法并行计算，自动挑用板最少、最紧的结果。
+- 可以把小零件排进大零件的镂空里：在“镂空”页把确认是废料的孔设为“可排入”（默认保留，因为孔里的料可能是要用的零件，比如舱盖）。
 - 排完自动核对数量、重叠、间距和边距。
 - 导出每张板一个 DXF，可直接拿去切。
 
-基本流程：导入 DXF → 在预览中处理问题项 → 设置参数 → 开始排版 → 导出 DXF。详细说明见软件里的“帮助”（F1）。
+基本流程：导入 DXF → 在预览中处理问题项 →（需要的话）放行镂空 → 设置参数 → 开始排版 → 导出 DXF。详细说明见软件里的“帮助”（F1）。
 
 暂不考虑木纹方向，计划在后续版本加入。
 
@@ -31,13 +32,14 @@ python nest_gui.py
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed --collect-binaries spyrrow --exclude-module matplotlib --exclude-module PyQt5 --exclude-module tkinter --name "航模DXF排版_v0.1.6" nest_gui.py
+pyinstaller --onefile --windowed --collect-binaries spyrrow --exclude-module matplotlib --exclude-module PyQt5 --exclude-module tkinter --name "航模DXF排版_v0.2.0" nest_gui.py
 ```
 
 ## 文件
 
 - `nest_gui.py`：界面
 - `nest_core.py`：读 DXF、识别零件、排版
+- `nest_hole.py`：识别能用的镂空，往镂空里排零件
 - `nest_post.py`：导出 DXF
 
 ## 算法来源与致谢

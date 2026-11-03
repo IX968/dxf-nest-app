@@ -1,4 +1,4 @@
-"""航模 DXF 排版 v0.1.6 —— 界面。python nest_gui.py"""
+"""航模 DXF 排版 v0.2.0 —— 界面。python nest_gui.py"""
 import sys, os, re, math, time, colorsys
 import multiprocessing as mp
 from PySide6.QtCore import Qt, QTimer, QSettings, QSize, QRectF
@@ -13,8 +13,9 @@ from shapely.geometry import Polygon
 from shapely import affinity
 import nest_core as N
 import nest_post as P
+import nest_hole as HL
 
-APP = '航模DXF排版 v0.1.6'
+APP = '航模DXF排版 v0.2.0'
 PRESETS = ['1000 × 100', '900 × 900', '300 × 200', '400 × 300', '600 × 300', '600 × 400', '900 × 600', '1200 × 600', '自定义']
 ROTS = [('90°', [0.0, 90.0, 180.0, 270.0]), ('45°', [45.0 * k for k in range(8)]),
         ('15°', [15.0 * k for k in range(24)]), ('任意角度', None), ('仅 180°', [0.0, 180.0]), ('不旋转', [0.0])]
@@ -24,6 +25,7 @@ HELP_HTML = """
 <li>点击“导入 DXF…”选择文件（可多选），或将 DXF 文件、文件夹拖入窗口。</li>
 <li>在“导入预览”中检查图形。“问题”页列出导入时发现的异常，逐项处理。</li>
 <li>在“零件”页核对数量，设置板材、边距、间距和旋转方式。</li>
+<li>需要把小零件排进大零件的镂空时，在“镂空”页把确认是废料的孔设为“可排入”（见下方“镂空排版”）。</li>
 <li>选择排版方式，点击“开始排版”。计算过程实时显示，完成后停在最终结果。</li>
 <li>点击“导出 DXF…”。多张板分别保存为“文件名_第N张.dxf”。</li>
 </ol>
@@ -55,7 +57,7 @@ HELP_HTML = """
 <li>按住左键拖出矩形框，完整框住的对象被选中。</li>
 <li>图中的选择与左侧列表同步，列表中也可用 Shift / Ctrl 多选。</li>
 <li>Delete 键或“删除所选”：删除选中的零件，或忽略选中的问题。</li>
-<li>右键菜单：删除、恢复已删除零件、忽略、作为零件、恢复为未处理。已删除的零件在预览中显示为灰色。</li>
+<li>右键菜单：删除、恢复已删除零件、忽略、作为零件、恢复为未处理、镂空可排入 / 保留。已删除的零件在预览中显示为灰色。</li>
 <li>滚轮缩放；按住中键拖动平移（排版结果中左键也可拖动）；双击显示全部。</li>
 </ul>
 
@@ -63,6 +65,18 @@ HELP_HTML = """
 <ul>
 <li><b>整板排版</b>：按设定的板材尺寸排列，一张放不下时自动增加板数，尽量少用板。</li>
 <li><b>靠角排版</b>：不设板材尺寸，零件向左下角紧凑排列，使占用矩形面积最小，便于在整板或余料的一角切割。结果显示占用尺寸（长 × 宽）。</li>
+</ul>
+
+<h3>镂空排版</h3>
+<ul>
+<li>“镂空”页列出能排进别的零件的孔：会切穿、孔里是空的、大小放得下要排的零件。预览中青色虚线为“保留”，绿色为“可排入”。</li>
+<li>默认全部<b>保留</b>，不往里排：孔里切下来的料可能是要用的零件，例如直接从机身板上切下来的舱盖，形状和减重孔一模一样，程序分不出来。
+确认是废料的孔，选中后点“可排入”（也可在预览中单击、框选后右键）；全是减重孔的文件可点“全部可排入”。同一种零件的每一件都按同样设置处理。</li>
+<li>以下孔自动排除，不会列出：孔里有东西（小孔、刻线、文字或小件）；轮廓是刻线、不会切穿；太小，放不下任何零件。</li>
+<li>开始排版时先把小零件排进“可排入”的孔（大的优先，离孔边、零件之间都保持设定的零件间距），再按整体排版。
+结果图中用绿色虚线标出排进了零件的孔，状态栏显示排进镂空的件数。</li>
+<li><b>切割顺序</b>：镂空里的零件必须先切，最后再切孔的轮廓，否则那块料先掉下去或移位，里面的零件就切歪了。
+导出文件中镂空里的零件写在前面；激光软件里请打开“先切内部形状”（LightBurn：Cut inner shapes first），或关闭路径优化按文件顺序切。</li>
 </ul>
 
 <h3>参数</h3>
@@ -87,7 +101,7 @@ HELP_HTML = """
 
 <h3>当前版本限制</h3>
 <ul>
-<li>不会把小零件放进大零件的孔内。</li>
+<li>镂空只嵌套一层：有“可排入”孔的零件，本身不会被排进别的孔；排进孔里的零件，它自己的孔不再往里排。</li>
 <li>不考虑木纹方向（轻木纹理方向计划在后续版本加入）。</li>
 <li>微连接只加在直线边上；全部由圆弧或样条组成的零件不加，会在左侧提示。</li>
 <li>点击“停止”会放弃本次计算结果。</li>
@@ -115,13 +129,20 @@ def color(k):
     return QColor(int(r * 255), int(g * 255), int(b * 255))
 
 
-def thumb(g, col, s=44, isl=()):
+def disp_path(p):
+    """零件在预览和结果里的样子：刻线框不画成孔；切穿的孔、镂空里的小件照常。"""
+    hs = HL.part_holes(p)
+    g = Polygon(p.poly.exterior, [r for r, h in zip(p.poly.interiors, hs) if not h['mark']])
+    return poly_path(g, p.islands)
+
+
+def thumb(p, col, s=44):
     pm = QPixmap(s, s); pm.fill(Qt.transparent)
-    b = g.bounds; k = (s - 6) / max(b[2] - b[0], b[3] - b[1], 1e-6)
+    b = p.poly.bounds; k = (s - 6) / max(b[2] - b[0], b[3] - b[1], 1e-6)
     qp = QPainter(pm); qp.setRenderHint(QPainter.Antialiasing)
     qp.translate(s / 2, s / 2); qp.scale(k, -k); qp.translate(-(b[0] + b[2]) / 2, -(b[1] + b[3]) / 2)
     pen = QPen(col.darker(160)); pen.setCosmetic(True); qp.setPen(pen); qp.setBrush(col)
-    qp.drawPath(poly_path(g, isl)); qp.end()
+    qp.drawPath(disp_path(p)); qp.end()
     return QIcon(pm)
 
 
@@ -194,8 +215,11 @@ class Main(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP); self.resize(1400, 860); self.setAcceptDrops(True)
-        self.files = []            # 每个文件：{'fd': FileData, 'opts': 读取选项, 'qty': 改过的数量, 'drop': 删掉的零件}
-        self.vmode = 'preview'; self.sel_parts = set(); self.sel_issues = set(); self._sync = False; self._pitems = []
+        # 每个文件：{'fd': FileData, 'opts': 读取选项, 'qty': 改过的数量, 'drop': 删掉的零件, 'holes': 设为可排入的孔}
+        self.files = []
+        self.vmode = 'preview'; self.sel_parts = set(); self.sel_issues = set(); self.sel_holes = set()
+        self._sync = False; self._pitems = []; self._hrows = []; self.phase = None; self.hole_cache = None
+        self.comps = {}; self.solid = {}; self.n_in_holes = 0        # 组合件、实际占用形状、排进镂空的件数
         self.proc = None; self.q = None; self.sheets = []; self.job = None
         self.cfg = QSettings('CUADC', 'DXFNest')
 
@@ -232,6 +256,21 @@ class Main(QMainWindow):
         self.b_open = QPushButton('未闭合全部作为零件'); self.b_open.clicked.connect(self.open_all)
         hb3.addWidget(self.b_open); hb3.addWidget(self.b_all); iv.addLayout(hb3)
         self.tabs.addTab(iw, '问题')
+        hw = QWidget(); hv2 = QVBoxLayout(hw); hv2.setContentsMargins(4, 4, 4, 4)
+        lb = QLabel('这里列出能排进别的零件的孔（会切穿、孔里是空的、放得下零件）。默认“保留”：孔里切下来的料'
+                    '可能是要用的零件（如舱盖）。确认是废料的孔设为“可排入”，开始排版时会把小零件排进去。')
+        lb.setWordWrap(True); hv2.addWidget(lb)
+        self.hlist = QListWidget(); self.hlist.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.hlist.itemSelectionChanged.connect(self.hole_selected); hv2.addWidget(self.hlist, 1)
+        self.hnote = QLabel(''); self.hnote.setWordWrap(True); self.hnote.setStyleSheet('color:#777'); hv2.addWidget(self.hnote)
+        hb4 = QHBoxLayout()
+        self.b_hfill = QPushButton('可排入'); self.b_hfill.clicked.connect(lambda: self.hole_act('fill'))
+        self.b_hkeep = QPushButton('保留'); self.b_hkeep.clicked.connect(lambda: self.hole_act('keep'))
+        self.b_hall = QPushButton('全部可排入'); self.b_hall.clicked.connect(lambda: self.hole_all('fill'))
+        self.b_hnone = QPushButton('全部保留'); self.b_hnone.clicked.connect(lambda: self.hole_all('keep'))
+        for x in (self.b_hfill, self.b_hkeep, self.b_hall, self.b_hnone): hb4.addWidget(x)
+        hv2.addLayout(hb4)
+        self.tabs.addTab(hw, '镂空')
         lv.addWidget(self.tabs, 1)
         self.info = InfoLabel(''); self.info.setWordWrap(True); self.info.setStyleSheet('color:#b06000')
         lv.addWidget(self.info)
@@ -313,6 +352,7 @@ class Main(QMainWindow):
         self.m_fill.toggled.connect(self.mode_changed); self.mode_changed()
         self.preset.currentIndexChanged.connect(self.preset_changed)
         for s in (self.sw, self.sh): s.valueChanged.connect(self.size_edited)
+        self.gap.valueChanged.connect(self.gap_changed)
         self.timer = QTimer(self); self.timer.timeout.connect(self.poll)
         self.draw_empty()
 
@@ -416,13 +456,14 @@ class Main(QMainWindow):
                 except Exception as ex: msgs.append(f'{os.path.basename(f)}：无法读取（{ex}）'); continue
                 if not fd.parts and not fd.issues: msgs.append(f'{fd.name}：未找到可用图形')
                 if fd.notes: msgs.append(f'{fd.name}：' + '；'.join(fd.notes))
-                self.files.append({'fd': fd, 'opts': opts, 'qty': {}, 'drop': set()}); have.add(os.path.normcase(f))
+                self.files.append({'fd': fd, 'opts': opts, 'qty': {}, 'drop': set(), 'holes': {}}); have.add(os.path.normcase(f))
         finally: QApplication.restoreOverrideCursor()
         self.info.setText('\n'.join(msgs)); self.refresh_all()
         if any(i.state == 'todo' for F in self.files for i in F['fd'].issues): self.tabs.setCurrentIndex(1)
 
     def refresh_all(self):
-        self.sel_parts = set(); self.sel_issues = set(); self.fill_table(); self.fill_issues(); self.set_show('preview'); self.reset_result()
+        self.sel_parts = set(); self.sel_issues = set(); self.sel_holes = set()
+        self.fill_table(); self.fill_issues(); self.set_show('preview'); self.reset_result()
 
     def reload(self, F):
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -498,21 +539,80 @@ class Main(QMainWindow):
         self.sel_parts = {(ps[r].src, self.pkey(ps[r])) for r in rows if r < len(ps)}
         if self.vmode == 'preview' and not self.running(): self.draw_preview(zoom=len(rows) == 1)
 
+    # ---------------- 镂空
+    def hkey(self, F, p, h): return (F['fd'].fn, self.pkey(p), h['key'])
+
+    def hole_state(self, F, p, h): return F['holes'].get((self.pkey(p), h['key']), 'keep')
+
+    def fill_holes_list(self):
+        """镂空页：列出候选孔 = 会切穿、孔里是空的、粗判放得下当前要排的某个零件。"""
+        gap = self.gap.value()
+        sd = [(s, HL.dims(s)) for s in (Polygon(N.item_shape(p.poly, gap)[0]) for p in self.parts if p.qty > 0)]
+        rows, busy, mark = [], 0, 0
+        for F in self.files:
+            for p in F['fd'].parts:
+                if self.pkey(p) in F['drop']: continue
+                for h in HL.part_holes(p):
+                    if h['mark']: mark += 1
+                    elif h['cut'] and h['busy']: busy += 1
+                    elif h['cut'] and sd and HL.fits_some(h['ring'], sd, gap): rows.append((F, p, h))
+        self._hrows = rows
+        self._sync = True; self.hlist.blockSignals(True); self.hlist.clear(); nf = 0
+        for F, p, h in rows:
+            st = self.hole_state(F, p, h); nf += st == 'fill'; b = h['ring'].bounds
+            n = f'（共 {p.qty} 件，每件都按此处理）' if p.qty > 1 else ''
+            it = QListWidgetItem(f'{F["fd"].name}  |  {p.name}  |  孔约 {b[2] - b[0]:.0f} × {b[3] - b[1]:.0f} mm  |  '
+                                 f'{"可排入" if st == "fill" else "保留"}{n}')
+            it.setForeground(QColor('#208a20' if st == 'fill' else '#2a7fa8'))
+            self.hlist.addItem(it)
+            if self.hkey(F, p, h) in self.sel_holes: it.setSelected(True)
+        self.hlist.blockSignals(False); self._sync = False
+        notes = ([f'{busy} 个孔里有东西（小孔、刻线、文字等），可能是要用的零件'] if busy else []) + \
+                ([f'{mark} 个是刻线框，不会切穿'] if mark else [])
+        self.hnote.setText('另有 ' + '；'.join(notes) + '，不参与。' if notes else '')
+        self.tabs.setTabText(2, f'镂空（{nf}/{len(rows)} 可排入）' if rows else '镂空')
+
+    def hole_selected(self):
+        if self._sync: return
+        rows = sorted({x.row() for x in self.hlist.selectedIndexes()})
+        self.sel_holes = {self.hkey(*self._hrows[r]) for r in rows if r < len(self._hrows)}
+        self.set_show('preview', draw=False); self.draw_preview(zoom=len(rows) == 1)
+
+    def set_hole(self, F, p, h, st):
+        if st == 'fill': F['holes'][(self.pkey(p), h['key'])] = 'fill'
+        else: F['holes'].pop((self.pkey(p), h['key']), None)
+
+    def hole_act(self, st):
+        if self.running() or not self.sel_holes: return
+        for F, p, h in self._hrows:
+            if self.hkey(F, p, h) in self.sel_holes: self.set_hole(F, p, h, st)
+        self.fill_holes_list(); self.set_show('preview', draw=False); self.reset_result()
+
+    def hole_all(self, st):
+        if self.running() or not self._hrows: return
+        for F, p, h in self._hrows: self.set_hole(F, p, h, st)
+        self.fill_holes_list(); self.set_show('preview', draw=False); self.reset_result()
+
+    def gap_changed(self, *_):
+        if self.running(): return
+        self.fill_holes_list()
+        if self.vmode == 'preview': self.draw_preview()
+
     # ---------------- 画面里点选/框选
     def scene_sel(self):
         if self._sync or self.vmode != 'preview': return
-        sp, si = set(), set()
+        sel = {'p': set(), 'i': set(), 'h': set()}
         for it, kind, key, pen in self._pitems:
             try:
-                if it.isSelected(): (sp if kind == 'p' else si).add(key)
+                if it.isSelected(): sel[kind].add(key)
             except RuntimeError: pass
-        self.sel_parts, self.sel_issues = sp, si
+        self.sel_parts, self.sel_issues, self.sel_holes = sel['p'], sel['i'], sel['h']
         self.restyle(); self.sync_lists()
 
     def restyle(self):
         hp = QPen(QColor('#ffe14d'), 3); hp.setCosmetic(True)
         for it, kind, key, pen in self._pitems:
-            on = key in (self.sel_parts if kind == 'p' else self.sel_issues)
+            on = key in {'p': self.sel_parts, 'i': self.sel_issues, 'h': self.sel_holes}[kind]
             try: it.setPen(hp if on else pen)
             except RuntimeError: pass
 
@@ -524,6 +624,8 @@ class Main(QMainWindow):
                 sm.select(self.tab.model().index(r, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
         for r, (F, i) in enumerate(self.all_issues()):
             self.ilist.item(r).setSelected((F['fd'].fn, i.key) in self.sel_issues)
+        for r, row in enumerate(self._hrows):
+            self.hlist.item(r).setSelected(self.hkey(*row) in self.sel_holes)
         self._sync = False
 
     def delete_sel(self):
@@ -557,6 +659,10 @@ class Main(QMainWindow):
             m.addAction(f'忽略（{len(self.sel_issues)} 项）', lambda: self.issue_act('ignore'))
             m.addAction('作为零件', lambda: self.issue_act('part'))
             m.addAction('恢复为未处理', lambda: self.issue_act('todo'))
+        if self.sel_holes:
+            if m.actions(): m.addSeparator()
+            m.addAction(f'镂空可排入（{len(self.sel_holes)} 个）', lambda: self.hole_act('fill'))
+            m.addAction('镂空保留（不往里排）', lambda: self.hole_act('keep'))
         if not m.actions(): m.addAction('未选中对象').setEnabled(False)
         m.exec(self.view.mapToGlobal(pos))
 
@@ -575,23 +681,41 @@ class Main(QMainWindow):
         gapx = max(30.0, 0.04 * W)
         def pen(c, w, dash=False):
             p = QPen(QColor(c), w, Qt.DashLine if dash else Qt.SolidLine); p.setCosmetic(True); return p
+        cands = {}
+        for F, p, h in self._hrows: cands.setdefault(id(p), []).append(h)
         for F in self.files:
             fd = F['fd']; b = fd.bounds; dx, dy = x0 - b[0], -b[1]
             t = QGraphicsSimpleTextItem(fd.name); t.setBrush(QColor('#e0e0e0')); t.setFont(QFont('Microsoft YaHei', 10))
             t.setFlag(QGraphicsSimpleTextItem.ItemIgnoresTransformations); t.setPos(x0, b[3] + dy)
             t.setTransform(QTransform.fromTranslate(0, -24)); sc.addItem(t)
             for p in fd.parts:
-                dropped = self.pkey(p) in F['drop']; qp = poly_path(p.poly, p.islands)
+                dropped = self.pkey(p) in F['drop']; qp = disp_path(p)
+                mk = QPainterPath()                                   # 刻线框：画成细线，不当孔
+                for h in HL.part_holes(p):
+                    if h['mark']: mk.addPath(poly_path(h['ring']))
+                hs = [] if dropped else cands.get(id(p), [])
                 for o in p.copies:
                     it = QGraphicsPathItem(qp)
                     col = QColor('#555a63') if dropped else QColor(getattr(p, 'col', QColor('#9ab')))
                     col.setAlpha(110 if dropped else 200); it.setBrush(col)
                     hl = (p.src, self.pkey(p)) in self.sel_parts; npen = pen(col.darker(170).name(), 1)
                     it.setPen(pen('#ffe14d', 3) if hl else npen)
-                    it.setTransform(QTransform.fromTranslate(o[0] + dx, o[1] + dy)); sc.addItem(it)
+                    tr = QTransform.fromTranslate(o[0] + dx, o[1] + dy); it.setTransform(tr); sc.addItem(it)
                     it.setFlag(QGraphicsItem.ItemIsSelectable); it.setSelected(hl)
                     self._pitems.append((it, 'p', (p.src, self.pkey(p)), npen))
                     if hl: focus = it.sceneBoundingRect() if focus is None else focus.united(it.sceneBoundingRect())
+                    if not mk.isEmpty():
+                        mi = QGraphicsPathItem(mk); mi.setPen(pen(col.darker(220).name(), 1)); mi.setTransform(tr)
+                        mi.setZValue(1); sc.addItem(mi)
+                    for h in hs:                                      # 候选孔：保留 = 青色虚线，可排入 = 绿色
+                        key = self.hkey(F, p, h); fill = self.hole_state(F, p, h) == 'fill'; on = key in self.sel_holes
+                        hi = QGraphicsPathItem(poly_path(h['ring'])); hi.setTransform(tr); hi.setZValue(4)
+                        npe = pen('#3ad06a', 2) if fill else pen('#36c5e0', 1.5, True)
+                        hi.setPen(pen('#ffe14d', 3) if on else npe)
+                        hi.setBrush(QColor(58, 208, 106, 110) if fill else QColor(54, 197, 224, 25))
+                        hi.setFlag(QGraphicsItem.ItemIsSelectable); sc.addItem(hi); hi.setSelected(on)
+                        self._pitems.append((hi, 'h', key, npe))
+                        if on: focus = hi.sceneBoundingRect() if focus is None else focus.united(hi.sceneBoundingRect())
             for i in fd.issues:
                 hl = (fd.fn, i.key) in self.sel_issues
                 if i.kind == 'frame':
@@ -631,7 +755,7 @@ class Main(QMainWindow):
         self.tab.setRowCount(len(ps))
         for r, p in enumerate(ps):
             p.col = color(r)
-            it = QTableWidgetItem(thumb(p.poly, p.col, isl=p.islands), p.name); it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+            it = QTableWidgetItem(thumb(p, p.col), p.name); it.setFlags(it.flags() & ~Qt.ItemIsEditable)
             self.tab.setItem(r, 0, it)
             it = QTableWidgetItem(f'{p.w:.1f} × {p.h:.1f}'); it.setFlags(it.flags() & ~Qt.ItemIsEditable)
             self.tab.setItem(r, 1, it)
@@ -641,10 +765,10 @@ class Main(QMainWindow):
             it = QTableWidgetItem(os.path.basename(p.src)); it.setToolTip(p.src); it.setFlags(it.flags() & ~Qt.ItemIsEditable)
             self.tab.setItem(r, 3, it)
         self.tab.blockSignals(False)
-        self.update_count()
+        self.update_count(); self.fill_holes_list()
 
     def qty_changed(self, p, v):
-        p.qty = v; self.fobj(p.src)['qty'][self.pkey(p)] = v; self.reset_result()
+        p.qty = v; self.fobj(p.src)['qty'][self.pkey(p)] = v; self.fill_holes_list(); self.reset_result()
 
     def update_count(self):
         n = sum(p.qty for p in self.parts)
@@ -762,7 +886,8 @@ class Main(QMainWindow):
             out, miss = [], 0
             for k, pl in enumerate(self.sheets):
                 items = [(self.byid[i], r, x + self.job_off, y + self.job_off) for i, r, x, y in pl]
-                polys = P.reading_order([(P.placed_poly(*it), it) for it in items])
+                solids = [self.placed_solid(*x) for x in pl]
+                polys = P.reading_order(list(zip(solids, items)))
                 mk, nm, ms = P.plan_marks([g for g, _ in polys], self.sheet_rect(k, pl), P.sheet_name(k),
                                           self.mark_h.value(), self.num_h.value(), self.mark_on.isChecked(),
                                           self.num_on.isChecked(), outside_ok=self.job_corner)
@@ -771,7 +896,12 @@ class Main(QMainWindow):
                 for part, r, x, y in items:
                     ca, sa = math.cos(math.radians(r)), math.sin(math.radians(r))
                     tp += [(u * ca - v * sa + x, u * sa + v * ca + y) for u, v in P.tab_points(part, tabs.get(id(part)))]
-                out.append(dict(items=items, marks=mk, nums=nm, tabpts=tp))
+                used_h = []                                       # 排进了零件的镂空，结果图里描出来
+                for g in solids:
+                    for r_ in g.interiors:
+                        hp = Polygon(r_)
+                        if any(hp.contains(q.representative_point()) for q in solids if q is not g): used_h.append(list(r_.coords))
+                out.append(dict(items=items, marks=mk, nums=nm, tabpts=tp, holes=used_h))
             used = list({id(self.byid[i]): self.byid[i] for pl in self.sheets for i, *_ in pl}.values())
             for p in used: P.part_prims(p)
             kept = sum(1 for p in used if p._kept); clash = [p.name for p in used if p._clash]
@@ -796,10 +926,12 @@ class Main(QMainWindow):
     def draw_post(self, k, ox, oy):
         if not self.post or k >= len(self.post['sheets']): return
         S = self.post['sheets'][k]; sc = self.view.scene()
-        for q, col in [(q, '#3a6df0') for q in S['marks']] + [(q, '#1f9d3a') for q in S['nums']]:
+        for q, col, w, dash in [(q, '#3a6df0', 1.6, False) for q in S['marks']] + [(q, '#1f9d3a', 1.6, False) for q in S['nums']] + \
+                [(q, '#2fbf5a', 2.0, True) for q in S.get('holes', [])]:
             path = QPainterPath(); path.moveTo(q[0][0] + ox, q[0][1] + oy)
             for x, y in q[1:]: path.lineTo(x + ox, y + oy)
-            it = QGraphicsPathItem(path); pe = QPen(QColor(col), 1.6); pe.setCosmetic(True); it.setPen(pe); it.setZValue(8); sc.addItem(it)
+            it = QGraphicsPathItem(path); pe = QPen(QColor(col), w, Qt.DashLine if dash else Qt.SolidLine); pe.setCosmetic(True)
+            it.setPen(pe); it.setZValue(8); sc.addItem(it)
         half = self.tab_mode.currentIndex() == 1
         for x, y in S['tabpts']:
             e = QGraphicsEllipseItem(-3, -3, 6, 6); e.setFlag(QGraphicsEllipseItem.ItemIgnoresTransformations)
@@ -822,8 +954,18 @@ class Main(QMainWindow):
         if self.running() or not self.sheets: return
         self.best = dict(sheets=self.sheets, score=self.score(), base_rot=dict(getattr(self, 'base_rot', {})),
                          byid=self.byid, off=self.job_off, corner=self.job_corner, n=getattr(self, 'redo_n', 1),
-                         chk=getattr(self, 'job_chk', None))
+                         chk=getattr(self, 'job_chk', None), solid=self.solid, nh=self.n_in_holes)
         self.start(again=True)
+
+    def restore_best(self):
+        b = self.best
+        self.sheets, self.base_rot, self.byid, self.job_off, self.job_corner = b['sheets'], b['base_rot'], b['byid'], b['off'], b['corner']
+        self.job_chk, self.solid, self.n_in_holes = b['chk'], b['solid'], b['nh']
+
+    def placed_solid(self, pid, rot, tx, ty):
+        """零件在板上的实际占用形状：外轮廓减去可排入的镂空，其他孔当实心。"""
+        g = self.solid.get(pid) or Polygon(self.byid[pid].poly.exterior)
+        return affinity.translate(affinity.rotate(g, rot, origin=(0, 0)), tx + self.job_off, ty + self.job_off)
 
     def score(self, sheets=None):
         """越小越好：整板 = (张数, -各张利用率平方和)；靠角 = 占用面积。"""
@@ -831,6 +973,11 @@ class Main(QMainWindow):
         if self.job_corner:
             r = self.bbox(sheets[0]); return (1, r.width() * r.height())
         return (len(sheets), -sum(self.util(pl) ** 2 for pl in sheets))
+
+    def fill_rings(self, p):
+        """零件上设为可排入、而且确实能用的孔（零件局部坐标）。"""
+        F = self.fobj(p.src)
+        return [h['ring'] for h in HL.part_holes(p) if h['cut'] and not h['busy'] and self.hole_state(F, p, h) == 'fill']
 
     def start(self, again=False):
         if self.running(): return
@@ -847,15 +994,19 @@ class Main(QMainWindow):
         L, H = self.sw.value(), self.sh.value(); m, gap = self.margin.value(), self.gap.value()
         rot = ROTS[self.rot.currentIndex()][1]
         shapes, qty, self.byid = {}, {}, {}
-        b = 0; bad = []
-        self.base_rot = {}
+        b = 0; bad = []; orig = {}; hosts = []
+        self.base_rot = {}; self.comps = {}; self.solid = {}; self.n_in_holes = 0
         for k, p in enumerate(self.parts):
             if p.qty <= 0: continue
-            pid = f'p{k}'; s, b = N.item_shape(p.poly, gap)
+            pid = f'p{k}'; s, b = N.item_shape(p.poly, gap); orig[pid] = s
             if rot is None:                                  # 任意角度：先转到最窄方向，求解器从 0° 起就能放下
                 a = N.narrow_angle(Polygon(s)); self.base_rot[pid] = a
                 s = [tuple(c) for c in affinity.rotate(Polygon(s), a, origin=(0, 0)).exterior.coords[:-1]]
-            shapes[pid] = s; qty[pid] = p.qty; self.byid[pid] = p; p.qpath = poly_path(p.poly, p.islands)
+            shapes[pid] = s; qty[pid] = p.qty; self.byid[pid] = p; p.qpath = disp_path(p)
+            fr = self.fill_rings(p)
+            if fr:                                           # 有可排入的镂空：占用形状挖掉这些孔
+                self.solid[pid] = Polygon(p.poly.exterior, [r.exterior.coords for r in fr])
+                hosts.append(dict(pid=pid, qty=p.qty, holes=[list(r.exterior.coords) for r in fr]))
             if not self.corner() and not self.fits(Polygon(s), rot if rot is not None else [0.0, 90.0, 180.0, 270.0],
                                                    L - 2 * m + 2 * b, H - 2 * m + 2 * b): bad.append(p.name)
         if bad:
@@ -863,22 +1014,77 @@ class Main(QMainWindow):
                                 ('\n…' if len(bad) > 20 else '') + '\n\n请更换板材尺寸或调整旋转方式。'); return
         self.job_off = m - b; self.job_corner = self.corner()
         self.job_chk = dict(L=L, H=H, m=m, gap=gap, qty=dict(qty))
-        job = dict(shapes=shapes, qty=qty, L=L - 2 * m + 2 * b, H=H - 2 * m + 2 * b, rot=rot,
-                   time=self.tsec.value(), mode='corner' if self.m_corner.isChecked() else 'fill',
-                   seed=int(time.time()) % 100000)
+        self.job = dict(shapes=shapes, qty=qty, L=L - 2 * m + 2 * b, H=H - 2 * m + 2 * b, rot=rot,
+                        time=self.tsec.value(), mode='corner' if self.m_corner.isChecked() else 'fill',
+                        seed=int(time.time()) % 100000)
         if again: self.redo_n = getattr(self, 'redo_n', 1) + 1
         self.sheets = []; self.post = None; self.final = False; self.t0 = time.time(); self.view.auto = True; self.waiting = False
-        self.vmode = 'result'; self.bv_res.setChecked(True)
+        self.vmode = 'result'; self.bv_res.setChecked(True); self.procs = []
+        if not hosts: self.launch(); return
+        # 先往镂空里排（子进程），排完再启动排版。输入没变（重排）就直接用上次的结果
+        hjob = dict(hosts=hosts, shapes=orig, qty=dict(qty), gap=gap, rot=rot); key = repr(hjob)
+        if self.hole_cache and self.hole_cache[0] == key:
+            self.apply_holes(self.hole_cache[1]); self.launch(); return
+        self.hole_job_key = key
+        ctx = mp.get_context('spawn'); self.q = ctx.Queue()
+        p = ctx.Process(target=HL.hole_worker, args=(hjob, self.q), daemon=True); p.start(); self.procs = [p]
+        self.phase = 'holes'; self.set_busy(True); self.timer.start(40)
+        self.view.scene().clear()
+        if not self.job_corner: self.draw_sheet(0)
+        self.stat.setText('正在往镂空里排零件…')
+
+    def launch(self):
+        """启动排版进程：同时算几个方案，最后取最好的。"""
+        job = self.job; self.phase = 'nest'
         ctx = mp.get_context('spawn'); self.q = ctx.Queue()
         cpu = os.cpu_count() or 4; nw = max(2, min(6, cpu // 4)); self.nw = nw; self.results = {}
         self.procs = []
-        for wid in range(nw):                               # 同时算几个方案，最后取最好的
+        for wid in range(nw):
             jb = dict(job, seed=job['seed'] + wid * 7919, threads=max(1, cpu // nw),
                       strategy='strip' if wid % 2 == 0 else 'shelf')
             p = ctx.Process(target=N.worker, args=(jb, self.q, wid), daemon=True); p.start(); self.procs.append(p)
         self.proc = self.procs[0]
         self.set_busy(True); self.timer.start(40)
-        self.stat.setText('正在启动…')
+        self.stat.setText('正在启动…' + (f'（已把 {self.n_in_holes} 件排进镂空）' if self.n_in_holes else ''))
+
+    def apply_holes(self, res):
+        """往孔里排的结果 → 组合件：装了同样零件的大零件副本合成一种（id 如 p3h0），外形和大零件一样；
+        被装进孔里的零件、变成组合件的大零件，数量相应扣掉。"""
+        job = self.job; grp = {}
+        for hp, cont in res: grp[(hp, cont)] = grp.get((hp, cont), 0) + 1
+        for n, ((hp, cont), c) in enumerate(grp.items()):
+            cid = f'{hp}h{n}'
+            job['shapes'][cid] = job['shapes'][hp]; job['qty'][cid] = c; job['qty'][hp] -= c
+            for i, *_ in cont: job['qty'][i] -= c
+            self.comps[cid] = (hp, cont); self.n_in_holes += c * len(cont)
+            if hp in self.base_rot: self.base_rot[cid] = self.base_rot[hp]
+        for i in [i for i, c in job['qty'].items() if c <= 0]: del job['qty'][i]; del job['shapes'][i]
+
+    def poll_holes(self):
+        res = err = None
+        def drain(block):
+            nonlocal res, err
+            try:
+                while True:
+                    m = self.q.get(timeout=0.5) if block else self.q.get_nowait()
+                    if m[0] == 'hprog':
+                        self.stat.setText(f'正在往镂空里排零件：第 {m[1]}/{m[2]} 个孔，已排进 {m[3]} 件，已用 {time.time() - self.t0:.0f} 秒')
+                    elif m[0] == 'hdone': res = m[1]; return
+                    elif m[0] == 'error': err = m[1]; return
+            except Exception: pass
+        drain(False)
+        if res is None and err is None:
+            if self.running(): return
+            drain(True)
+            if res is None and err is None: err = '往镂空里排零件的进程异常退出。'
+        self.timer.stop(); self.kill_all()
+        if err is not None:
+            self.phase = None; self.set_busy(False)
+            if getattr(self, 'best', None): self.restore_best(); self.compute_post(); self.draw_state()
+            else: self.draw_empty()
+            QMessageBox.critical(self, APP, '往镂空里排零件时出错：\n' + err[-1500:]); return
+        self.hole_cache = (self.hole_job_key, res)
+        self.apply_holes(res); self.launch()
 
     def compare_best(self):
         """重排后和之前的结果比，保留更好的。返回附加说明。"""
@@ -888,7 +1094,7 @@ class Main(QMainWindow):
         desc = lambda sc, corner: f'{sc[1] / 100:.0f} cm²' if corner else f'{sc[0]} 张'
         if new <= b['score']:
             return f'（第 {n} 次计算，比之前更好或相同，已采用：{desc(new, self.job_corner)}，之前 {desc(b["score"], b["corner"])}）'
-        self.sheets, self.base_rot, self.byid, self.job_off, self.job_corner = b['sheets'], b['base_rot'], b['byid'], b['off'], b['corner']; self.job_chk = b['chk']
+        self.restore_best()
         return f'（第 {n} 次计算得到 {desc(new, self.job_corner)}，不如之前的 {desc(b["score"], b["corner"])}，已保留之前的结果）'
 
     def verify(self):
@@ -896,7 +1102,7 @@ class Main(QMainWindow):
         from shapely.strtree import STRtree
         c = getattr(self, 'job_chk', None)
         if not c or not self.sheets: return []
-        bad = []; tol = 0.1; off = self.job_off
+        bad = []; tol = 0.1
         cnt = {}
         for pl in self.sheets:
             for i, *_ in pl: cnt[i] = cnt.get(i, 0) + 1
@@ -905,7 +1111,7 @@ class Main(QMainWindow):
                 bad.append(f'{self.byid[i].name}：应有 {q} 件，排了 {cnt.get(i, 0)} 件')
         for k, pl in enumerate(self.sheets):
             sn = f'第 {k + 1} 张'
-            gs = [Polygon(P.placed_poly(self.byid[i], r, x + off, y + off).exterior) for i, r, x, y in pl]
+            gs = [self.placed_solid(*x) for x in pl]           # 孔里的零件和大零件不算重叠；排进“保留”的孔会报出来
             names = [self.byid[i].name for i, *_ in pl]
             for g, nm in zip(gs, names):
                 b = g.bounds
@@ -925,8 +1131,15 @@ class Main(QMainWindow):
         return bad
 
     def fixrot(self, pl):
-        b = getattr(self, 'base_rot', {})
-        return [(i, r + b.get(i, 0.0), x, y) for i, r, x, y in pl]
+        """求解结果 → 普通放置：加回基准角；组合件展开成孔里的零件（写在前面，导出时先切）和大零件。"""
+        b = getattr(self, 'base_rot', {}); C = getattr(self, 'comps', {}); out = []
+        for i, r, x, y in pl:
+            r = r + b.get(i, 0.0)
+            if i in C:
+                i, cont = C[i]; ca, sa = math.cos(math.radians(r)), math.sin(math.radians(r))
+                out += [(j, r + rj, x + xj * ca - yj * sa, y + xj * sa + yj * ca) for j, rj, xj, yj in cont]
+            out.append((i, r, x, y))
+        return out
 
     @staticmethod
     def fits(g, rot, L, H):
@@ -944,22 +1157,23 @@ class Main(QMainWindow):
         self.bstart.setEnabled(not busy); self.bstop.setEnabled(busy); self.bexp.setEnabled(not busy and bool(self.sheets))
         self.bredo.setEnabled(not busy and bool(self.sheets))
         for w in (self.tab, self.preset, self.sw, self.sh, self.margin, self.gap, self.rot, self.m_fill, self.m_corner, self.tsec,
-                  self.b_ign, self.b_part, self.b_todo, self.b_all, self.b_open, self.bv_pre):
+                  self.b_ign, self.b_part, self.b_todo, self.b_all, self.b_open, self.bv_pre,
+                  self.b_hfill, self.b_hkeep, self.b_hall, self.b_hnone):
             w.setEnabled(not busy)
         if not busy: self.mode_ui()
         self.post_ui()
 
     def stop(self):
         self.kill_all()
-        self.proc = None; self.timer.stop(); self.sheets = []
-        b = getattr(self, 'best', None)
-        if b:                                              # 重排中途停止：恢复之前的结果
-            self.sheets, self.base_rot, self.byid, self.job_off, self.job_corner = b['sheets'], b['base_rot'], b['byid'], b['off'], b['corner']; self.job_chk = b['chk']
+        self.proc = None; self.timer.stop(); self.sheets = []; self.phase = None
+        if getattr(self, 'best', None):                    # 重排中途停止：恢复之前的结果
+            self.restore_best()
             self.set_busy(False); self.compute_post(); self.stat.setText('已停止，保留之前的结果。'); self.draw_state(); return
         self.set_busy(False)
         self.stat.setText('已停止。'); self.draw_empty()
 
     def poll(self):
+        if self.phase == 'holes': self.poll_holes(); return
         last = None; msgs = []
         try:
             while True:
@@ -985,14 +1199,15 @@ class Main(QMainWindow):
         if self.procs and len(self.results) >= self.nw:
             ok = [[self.fixrot(s) for s in r[1]] for r in self.results.values() if r[0] == 'done' and r[1]]
             if not ok:
-                self.timer.stop(); self.kill_all(); self.proc = None; self.set_busy(False); self.sheets = []
+                self.timer.stop(); self.kill_all(); self.proc = None; self.phase = None; self.set_busy(False); self.sheets = []
                 err = self.results.get(0, next(iter(self.results.values())))[1]
-                txt = re.sub(r'p(\d+)', lambda mm: self.byid[mm.group(0)].name if mm.group(0) in self.byid else mm.group(0), err)
+                nm = lambda mm: self.byid[f'p{mm.group(1)}'].name if f'p{mm.group(1)}' in self.byid else mm.group(0)
+                txt = re.sub(r'p(\d+)(h\d+)?', nm, err)                 # 组合件 p3h0 也显示大零件的名字
                 QMessageBox.critical(self, APP, '排版出错：\n' + txt[-1500:]); self.draw_empty(); return
             msgs = [('done', min(ok, key=self.score))]
         for m in msgs:
             if m[0] == 'done':
-                self.sheets = m[1]; self.timer.stop(); self.kill_all(); self.proc = None
+                self.sheets = m[1]; self.timer.stop(); self.kill_all(); self.proc = None; self.phase = None
                 cmp = self.compare_best(); self.set_busy(False)
                 t_v = time.time(); bad = self.verify()
                 if os.environ.get('NEST_SELFTEST'): print('verify', round((time.time() - t_v) * 1000), 'ms', len(bad), bad[:5], flush=True)
@@ -1001,13 +1216,14 @@ class Main(QMainWindow):
                     QMessageBox.warning(self, APP, '排版结果核对发现问题（切割前请检查）：\n' + '\n'.join(bad[:15]) +
                                         ('\n…' if len(bad) > 15 else ''))
                 n = sum(len(s) for s in self.sheets); self.compute_post(); self.post_ui()
+                nh = f'（其中 {self.n_in_holes} 件排在镂空里）' if self.n_in_holes else ''
                 if self.job_corner:
                     r = self.bbox(self.sheets[0]); m = self.margin.value(); W, H = r.right() + m, r.bottom() + m
                     a = sum(self.byid[i].area for i, *_ in self.sheets[0])
-                    self.stat.setText(f'排版完成：共 {n} 件，占用 {W:.0f} × {H:.0f} mm，利用率 {a / (W * H):.0%}，用时 {el:.0f} 秒。' + cmp)
+                    self.stat.setText(f'排版完成：共 {n} 件{nh}，占用 {W:.0f} × {H:.0f} mm，利用率 {a / (W * H):.0%}，用时 {el:.0f} 秒。' + cmp)
                     self.draw_state(); return
                 us = '，'.join(f'{self.util(s):.0%}' for s in self.sheets)
-                self.stat.setText(f'排版完成：共 {n} 件，用板 {len(self.sheets)} 张，利用率 {us}，用时 {el:.0f} 秒。' + cmp)
+                self.stat.setText(f'排版完成：共 {n} 件{nh}，用板 {len(self.sheets)} 张，利用率 {us}，用时 {el:.0f} 秒。' + cmp)
                 self.draw_state(); return
         if 0 in self.results and last is None:
             if not getattr(self, 'waiting', False): self.draw_state(); self.waiting = True
