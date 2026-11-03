@@ -1,4 +1,4 @@
-"""航模 DXF 排版 v0.1.5 —— 核心：读 DXF → 零件，排版求解（子进程，实时进度）。导出见 nest_post.py。"""
+"""航模 DXF 排版 v0.1.6 —— 核心：读 DXF → 零件，排版求解（子进程，实时进度）。导出见 nest_post.py。"""
 import math, os, re, time, threading, traceback
 import ezdxf
 from ezdxf import path as dpath, disassemble, recover
@@ -65,6 +65,12 @@ def _aci(e, doc):
     return abs(c)
 
 
+def _tc(e):
+    """真彩色（24 位 RGB 整数），没设就是 None。有些软件只用真彩色区分切割和雕刻。"""
+    try: return e.dxf.get('true_color')
+    except Exception: return None
+
+
 def _snap_lines(lines):
     """端点小于 SNAP 的当成同一点（只是数值误差，不算补缝）。"""
     grid = {}
@@ -83,8 +89,9 @@ def _snap_lines(lines):
 
 
 class _Rec:
-    __slots__ = ('e', 'pts', 'rep', 'lay', 'aci')
-    def __init__(self, e, pts, rep, lay, aci): self.e, self.pts, self.rep, self.lay, self.aci = e, pts, rep, lay, aci
+    __slots__ = ('e', 'pts', 'rep', 'lay', 'aci', 'tc')
+    def __init__(self, e, pts, rep, lay, aci, tc):
+        self.e, self.pts, self.rep, self.lay, self.aci, self.tc = e, pts, rep, lay, aci, tc
 
 
 def _rnd(p, k=2): return (round(p[0], k), round(p[1], k))
@@ -111,13 +118,13 @@ def load_dxf(fn, opts=None):
             mx = sum(p[0] for p in pts) / len(pts); my = sum(p[1] for p in pts) / len(pts)
             k = ('c', frozenset({_rnd(pts[0]), _rnd(pts[-1])}), _rnd((mx, my)), round(LineString(pts).length, 2))
             if k in seen: dup += 1; continue
-            seen.add(k); recs.append(_Rec(e, pts, pts[len(pts) // 2], lay, _aci(e, doc)))
+            seen.add(k); recs.append(_Rec(e, pts, pts[len(pts) // 2], lay, _aci(e, doc), _tc(e)))
         elif t in TEXTS:
             try: ip = e.dxf.insert
             except Exception: continue
             k = ('t', t, e.dxf.get('text', '') if t == 'TEXT' else e.text, _rnd((ip.x, ip.y)))
             if k in seen: dup += 1; continue
-            seen.add(k); recs.append(_Rec(e, None, (ip.x * sc, ip.y * sc), lay, _aci(e, doc)))
+            seen.add(k); recs.append(_Rec(e, None, (ip.x * sc, ip.y * sc), lay, _aci(e, doc), _tc(e)))
         else: skipped += 1
     if dup: notes.append(f'已删除重复线 {dup} 条')
     if skipped: notes.append(f'已忽略不支持的图元 {skipped} 个（填充、标注等）')
@@ -340,7 +347,7 @@ def load_dxf(fn, opts=None):
                 gs = list(seg.geoms) if hasattr(seg, 'geoms') else [seg]
                 clip = [[(x - b[0], y - b[1]) for x, y in q.coords] for q in gs if q.geom_type == 'LineString' and q.length > 0.05]
                 if not clip: continue
-            ents.append((r.e, r.lay, r.aci, clip))
+            ents.append((r.e, r.lay, r.aci, r.tc, clip))
         parts.append(Part('', fn, g0, ents, m, (b[0], b[1]))); parts[-1].has_gaps = gp
         parts[-1].islands = [affinity.translate(q, -b[0], -b[1]) for q in il if q.is_valid]
         parts[-1].area += sum(q.area for q in parts[-1].islands)

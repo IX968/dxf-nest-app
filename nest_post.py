@@ -76,19 +76,25 @@ def _xf(M, p):
 
 
 # ---------------------------------------------------------------- 零件拆成导出单元
+def _bw(aci, tc):
+    """黑/白色：ACI 7（白底显示黑、黑底显示白），或真彩色纯黑、纯白。“切割”层就是这个颜色。"""
+    return tc in (0x000000, 0xFFFFFF) if tc is not None else aci == 7
+
+
 def part_prims(part):
     """零件图元 → 导出单元（零件局部坐标）。直线单独拿出来，以便加微连接。
-    每项 [kind, a/ent, b, layer, aci, 是否外轮廓]。"""
+    每项 [kind, a/ent, b, layer, aci, 是否外轮廓, 真彩色, 是否放进切割层]。"""
     if getattr(part, '_prims', None) is not None: return part._prims
-    ext = part.poly.exterior; prims = []
+    ext = part.poly.exterior; prims = []; lens = []
     def on_ext(pts): return all(ext.distance(Point(q)) < 0.05 for q in (pts[0], pts[len(pts) // 2], pts[-1]))
-    def add_line(a, b, lay, aci):
+    def add_line(a, b, lay, aci, tc):
         if math.dist(a, b) > 1e-6:
-            prims.append(['line', a, b, lay, aci, on_ext([a, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), b])])
-    for e, lay, aci, clip in part.ents:
+            prims.append(['line', a, b, lay, aci, on_ext([a, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), b]), tc])
+            lens.append(math.dist(a, b))
+    for e, lay, aci, tc, clip in part.ents:
         if clip is not None:
             for q in clip:
-                for a, b in zip(q[:-1], q[1:]): add_line(a, b, lay, aci)
+                for a, b in zip(q[:-1], q[1:]): add_line(a, b, lay, aci, tc)
             continue
         subs = [e]
         if e.dxftype() in ('LWPOLYLINE', 'POLYLINE'):            # 只拆外轮廓上的多段线（要加微连接）
@@ -98,15 +104,26 @@ def part_prims(part):
             except Exception: subs = [e]
         for s in subs:
             if s.dxftype() == 'LINE':
-                add_line(_xf(part.mloc, s.dxf.start), _xf(part.mloc, s.dxf.end), lay, aci); continue
+                add_line(_xf(part.mloc, s.dxf.start), _xf(part.mloc, s.dxf.end), lay, aci, tc); continue
             try: pts = [_xf(part.mloc, (v.x, v.y)) for v in dpath.make_path(s).flattening(0.1)]
             except Exception: pts = None
-            prims.append(['ent', s, None, lay, aci, bool(pts) and len(pts) >= 2 and on_ext(pts)])
-    c = collections.Counter()
-    for p in prims:
-        if p[5]: c[p[3]] += math.dist(p[1], p[2]) if p[0] == 'line' else 1.0
-    tot = sum(c.values())
-    part._cutlays = {k for k, v in c.items() if v > 0.1 * tot}      # 外轮廓用到的图层 = 切割层
+            prims.append(['ent', s, None, lay, aci, bool(pts) and len(pts) >= 2 and on_ext(pts), tc])
+            lens.append(sum(math.dist(p, q) for p, q in zip(pts, pts[1:])) if pts else 0.0)
+    # 哪些线放进“切割”层（按长度算，占外轮廓 10% 以上才算外轮廓的主要图层 / 颜色）：
+    # · 外轮廓上的线：图层是外轮廓的主要图层就切。
+    # · 零件内部的线：图层和颜色都要和外轮廓一致才切（如减重孔）。同图层、不同颜色的当刻线，
+    #   保留原图层和颜色 —— LightBurn、RDWorks 等激光软件按颜色区分切割和雕刻。
+    by_lay, by_col = collections.Counter(), collections.Counter()
+    for p, n in zip(prims, lens):
+        if p[5]: by_lay[p[3]] += n; by_col[(p[3], p[4], p[6])] += n
+    tot = sum(by_lay.values())
+    lays = {k for k, v in by_lay.items() if v > 0.1 * tot}
+    cols = {k for k, v in by_col.items() if v > 0.1 * tot}
+    for p in prims: p.append(p[3] in lays if p[5] else (p[3], p[4], p[6]) in cols)
+    geo = [p for p in prims if p[0] == 'line' or p[1].dxftype() not in TEXTS]
+    part._kept = sum(1 for p in geo if not p[5] and not p[7] and p[3] in lays)    # 同图层、不同颜色，按刻线保留
+    # 原图切割线不是黑/白色，零件上却有黑/白色的刻线：导出后切割层是黑/白色，按颜色分加工的软件里会混在一起
+    part._clash = not any(_bw(c[1], c[2]) for c in cols) and any(not p[7] and _bw(p[4], p[6]) for p in geo)
     part._prims = prims
     return prims
 
@@ -231,14 +248,15 @@ def export_sheet(fn, items, sheet_wh, frame=False, texts=False, tabs=None, half=
         W_ = lambda p: (p[0] * ca - p[1] * sa + tx, p[0] * sa + p[1] * ca + ty)
         M = Matrix44.chain(part.mloc, Matrix44.z_rotate(math.radians(rot)), Matrix44.translate(tx, ty, 0))
         for k, p in enumerate(prims):
-            kind, a, b, lay, aci, ext = p
-            if lay in part._cutlays: L_, col = LAY_CUT, 256
+            kind, a, b, lay, aci, ext, tc, cut = p
+            if cut: L_, col, tc = LAY_CUT, 256, None
             else:
                 L_, col = lay, aci
                 if L_ not in doc.layers:
                     try: _layer(doc, L_, aci)
                     except Exception: L_ = '0'
             at = {'layer': L_, 'color': col}
+            if tc is not None: at['true_color'] = tc
             if kind == 'line':
                 Lg = math.dist(a, b); d = ((b[0] - a[0]) / Lg, (b[1] - a[1]) / Lg)
                 pt = lambda u: (a[0] + d[0] * u, a[1] + d[1] * u); s0 = 0.0
@@ -253,6 +271,8 @@ def export_sheet(fn, items, sheet_wh, frame=False, texts=False, tabs=None, half=
             try:
                 c = e.copy(); c.transform(M)
                 c.dxf.layer = L_; c.dxf.color = col
+                if tc is None: c.dxf.discard('true_color')         # 真彩色会盖过图层颜色，切割线要去掉
+                else: c.dxf.true_color = tc
                 if c.dxf.hasattr('linetype'): c.dxf.linetype = 'BYLAYER'
                 if c.dxf.hasattr('style'): c.dxf.style = 'Standard'
                 msp.add_foreign_entity(c, copy=False)
