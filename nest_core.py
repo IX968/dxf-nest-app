@@ -1,4 +1,4 @@
-"""航模 DXF 排版 v0.1.1 —— 核心：读 DXF → 零件，排版求解（子进程，实时进度），导出 DXF。"""
+"""航模 DXF 排版 v0.1.5 —— 核心：读 DXF → 零件，排版求解（子进程，实时进度）。导出见 nest_post.py。"""
 import math, os, re, time, threading, traceback
 import ezdxf
 from ezdxf import path as dpath, disassemble, recover
@@ -177,7 +177,8 @@ def load_dxf(fn, opts=None):
     fd_ = [rect_dims(polys[i][0]) for i in range(n) if frame[i]]
     for i in range(n):
         g = polys[i][0]
-        if not frame[i] and parent[i] < 0 and g.area / g.minimum_rotated_rectangle.area > 0.999 and                 any(abs(a[0] - d[0]) <= 1 and abs(a[1] - d[1]) <= 1 for d in fd_ for a in [rect_dims(g)]): frame[i] = True
+        if not frame[i] and parent[i] < 0 and g.area / g.minimum_rotated_rectangle.area > 0.999 and \
+                any(abs(a[0] - d[0]) <= 1 and abs(a[1] - d[1]) <= 1 for d in fd_ for a in [rect_dims(g)]): frame[i] = True
     frames = [i for i in range(n) if frame[i]]
     if keep_frame: frame = [False] * n
     depth = [0] * n
@@ -347,7 +348,9 @@ def load_dxf(fn, opts=None):
     for p in parts:                                      # 同形零件合并成数量
         for q in merged:
             if abs(p.area - q.area) < 1e-3 * q.area + 0.05 and abs(p.w - q.w) < 0.05 and abs(p.h - q.h) < 0.05 \
-                    and p.poly.symmetric_difference(q.poly).area < 2e-3 * q.area + 0.1                     and len(p.islands) == len(q.islands)                     and (not p.islands or unary_union(p.islands).symmetric_difference(unary_union(q.islands)).area < 0.5):
+                    and p.poly.symmetric_difference(q.poly).area < 2e-3 * q.area + 0.1 \
+                    and len(p.islands) == len(q.islands) \
+                    and (not p.islands or unary_union(p.islands).symmetric_difference(unary_union(q.islands)).area < 0.5):
                 q.qty += 1; q.copies.append(p.org); break
         else: merged.append(p)
     merged.sort(key=lambda p: -p.area)
@@ -618,42 +621,3 @@ def worker(job, outq, wid=0):
     try: run_job(job, outq)
     except NestError as ex: outq.put(('error', str(ex)))
     except Exception: outq.put(('error', traceback.format_exc()))
-
-
-# ---------------------------------------------------------------- 导出
-def export_sheet(fn, parts_by_id, placements, off, sheet_wh, frame=False, texts=False):
-    doc = ezdxf.new('R2010', setup=True); doc.units = ezdxf.units.MM
-    msp = doc.modelspace(); lays = set(l.dxf.name for l in doc.layers)
-    if frame:
-        doc.layers.add('板框', color=8)
-        msp.add_lwpolyline([(0, 0), (sheet_wh[0], 0), sheet_wh, (0, sheet_wh[1])], close=True, dxfattribs={'layer': '板框'})
-    n = 0
-    for pid, rot, tx, ty in placements:
-        part = parts_by_id[pid]
-        M = Matrix44.chain(part.mloc, Matrix44.z_rotate(math.radians(rot)), Matrix44.translate(tx + off, ty + off, 0))
-        ca, sa = math.cos(math.radians(rot)), math.sin(math.radians(rot))
-        for e, lay, aci, clip in part.ents:
-            if not texts and e.dxftype() in TEXTS: continue
-            if lay not in lays:
-                try: doc.layers.add(lay, color=aci)
-                except Exception: lay = '0'
-                lays.add(lay)
-            if clip is not None:                             # 共边线截出的一段
-                for q in clip:
-                    msp.add_lwpolyline([(x * ca - y * sa + tx + off, x * sa + y * ca + ty + off) for x, y in q],
-                                       dxfattribs={'layer': lay, 'color': aci})
-                n += 1; continue
-            try:
-                c = e.copy(); c.transform(M)
-                c.dxf.layer = lay; c.dxf.color = aci
-                if c.dxf.hasattr('linetype'): c.dxf.linetype = 'BYLAYER'
-                if c.dxf.hasattr('style'): c.dxf.style = 'Standard'
-                msp.add_foreign_entity(c, copy=False)
-            except Exception:
-                try:
-                    p = dpath.make_path(e).transform(M)
-                    for q in dpath.render_splines_and_polylines(msp, [p], dxfattribs={'layer': lay, 'color': aci}): pass
-                except Exception: continue
-            n += 1
-    doc.saveas(fn)
-    return n
