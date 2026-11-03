@@ -1,4 +1,4 @@
-"""航模 DXF 排版 v0.1.1 —— 界面。python nest_gui.py"""
+"""航模 DXF 排版 v0.1.5 —— 界面。python nest_gui.py"""
 import sys, os, re, math, time, colorsys
 import multiprocessing as mp
 from PySide6.QtCore import Qt, QTimer, QSettings, QSize, QRectF
