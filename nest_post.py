@@ -124,8 +124,18 @@ def part_prims(part):
     part._kept = sum(1 for p in geo if not p[5] and not p[7] and p[3] in lays)    # 同图层、不同颜色，按刻线保留
     # 原图切割线不是黑/白色，零件上却有黑/白色的刻线：导出后切割层是黑/白色，按颜色分加工的软件里会混在一起
     part._clash = not any(_bw(c[1], c[2]) for c in cols) and any(not p[7] and _bw(p[4], p[6]) for p in geo)
-    part._prims = prims
+    part._prims = prims; part._lens = lens
     return prims
+
+
+def prim_points(part, p):
+    """导出单元的采样点（零件局部坐标）；文字取插入点。取不到返回 []。"""
+    if p[0] == 'line': a, b = p[1], p[2]; return [a, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), b]
+    e = p[1]
+    try:
+        if e.dxftype() in TEXTS: return [_xf(part.mloc, e.dxf.insert)]
+        return [_xf(part.mloc, (v.x, v.y)) for v in dpath.make_path(e).flattening(0.1)]
+    except Exception: return []
 
 
 # ---------------------------------------------------------------- 微连接
@@ -162,14 +172,17 @@ def tab_points(part, plan):
 
 # ---------------------------------------------------------------- 板号、零件编号
 def plan_marks(polys, rect, letter, letter_h, num_h, do_letter, do_nums, outside_ok=False):
-    """polys：本张板各零件的实际外形（世界坐标，已按阅读顺序排好）。rect：可用范围 (x0,y0,x1,y1)。
+    """polys：本张板各零件的实际占用形状（世界坐标，已按阅读顺序排好）：外轮廓减去“可排入”的镂空，
+    其他孔当实心（孔里是废料或要保留的料）。rect：可用范围 (x0,y0,x1,y1)。
     返回 (板号笔画, 编号笔画, 没地方放的编号个数)。"""
-    polys = [Polygon(g.exterior) for g in polys]          # 孔也算禁放区（孔里是废料）
-    obst = [g.buffer(0.6) for g in polys]
-    tree = STRtree(obst) if obst else None
+    full = [Polygon(g.exterior) for g in polys]          # 板号不刻进任何孔：孔里的料切完可能掉下来
+    trees = {}
+    for k, gs in (('num', polys), ('letter', full)):
+        ob = [g.buffer(0.6) for g in gs]; trees[k] = (ob, STRtree(ob) if ob else None)
     area = prep(box(*rect)); placed = []
-    def free(geom, skip=-1):
+    def free(geom, skip=-1, kind='num'):
         if not area.contains(geom): return False
+        obst, tree = trees[kind]
         if tree is not None and any(j != skip and obst[j].intersects(geom) for j in tree.query(geom)): return False
         return not any(q.intersects(geom) for q in placed)
     marks, nums, miss = [], [], 0
@@ -181,7 +194,7 @@ def plan_marks(polys, rect, letter, letter_h, num_h, do_letter, do_nums, outside
         pos = None
         for sx, sy in spots:
             B = box(sx - 0.5, sy - 0.5, sx + w + 0.5, sy + h + 0.5)
-            if free(B): pos = (sx, sy); placed.append(B); break
+            if free(B, kind='letter'): pos = (sx, sy); placed.append(B); break
         if pos is None and outside_ok: pos = (x0, y1 + 2.0)
         if pos is not None: marks = text_strokes(letter, pos[0], pos[1], h)
     if do_nums:

@@ -1,4 +1,4 @@
-"""航模 DXF 排版 v0.1.6 —— 核心：读 DXF → 零件，排版求解（子进程，实时进度）。导出见 nest_post.py。"""
+"""航模 DXF 排版 v0.2.0 —— 核心：读 DXF → 零件，排版求解（子进程，实时进度）。导出见 nest_post.py。"""
 import math, os, re, time, threading, traceback
 import ezdxf
 from ezdxf import path as dpath, disassemble, recover
