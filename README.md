@@ -4,7 +4,7 @@
 
 ## 下载
 
-不想装 Python 的话，直接到右边 **Releases** 下载 `航模DXF排版_v0.1.5.exe`，双击运行（第一次启动要等几秒）。
+不想装 Python 的话，直接到右边 **Releases** 下载 `航模DXF排版_v0.1.6.exe`，双击运行（第一次启动要等几秒）。
 
 ## 能做什么
 
@@ -31,7 +31,7 @@ python nest_gui.py
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed --collect-binaries spyrrow --exclude-module matplotlib --exclude-module PyQt5 --exclude-module tkinter --name "航模DXF排版_v0.1.5" nest_gui.py
+pyinstaller --onefile --windowed --collect-binaries spyrrow --exclude-module matplotlib --exclude-module PyQt5 --exclude-module tkinter --name "航模DXF排版_v0.1.6" nest_gui.py
 ```
 
 ## 文件

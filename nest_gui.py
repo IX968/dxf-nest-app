@@ -1,4 +1,4 @@
-"""航模 DXF 排版 v0.1.5 —— 界面。python nest_gui.py"""
+"""航模 DXF 排版 v0.1.6 —— 界面。python nest_gui.py"""
 import sys, os, re, math, time, colorsys
 import multiprocessing as mp
 from PySide6.QtCore import Qt, QTimer, QSettings, QSize, QRectF
@@ -14,7 +14,7 @@ from shapely import affinity
 import nest_core as N
 import nest_post as P
 
-APP = '航模DXF排版 v0.1.5'
+APP = '航模DXF排版 v0.1.6'
 PRESETS = ['1000 × 100', '900 × 900', '300 × 200', '400 × 300', '600 × 300', '600 × 400', '900 × 600', '1200 × 600', '自定义']
 ROTS = [('90°', [0.0, 90.0, 180.0, 270.0]), ('45°', [45.0 * k for k in range(8)]),
         ('15°', [15.0 * k for k in range(24)]), ('任意角度', None), ('仅 180°', [0.0, 180.0]), ('不旋转', [0.0])]
@@ -34,7 +34,7 @@ HELP_HTML = """
 <li>同一文件中形状相同的零件自动合并，数量可在“零件”页修改，数量为 0 的零件不参与排版。</li>
 <li>端点间距小于 0.05 mm 的线段视为相连。</li>
 <li>重复的线条自动删除，只保留一条。</li>
-<li>导出时保留原图元（圆弧、样条不转换为折线），图层和颜色不变，单位为 mm。</li>
+<li>导出时保留原图元（圆弧、样条不转换为折线），单位为 mm。切割线和刻线的图层、颜色见下方“后处理”。</li>
 <li>零件轮廓内的文字（TEXT / MTEXT）默认不导出，需要时勾选“导出零件上的文字”。用线条画成的刻字不受此选项影响，始终导出。</li>
 </ul>
 
@@ -81,7 +81,8 @@ HELP_HTML = """
 <li><b>板号</b>：每张板的空角刻一个字母，第 1 张 A，第 2 张 B，依次类推，蓝色“板号”图层。</li>
 <li><b>零件编号</b>：每张板上的零件从上到下、从左到右编号，编号刻在零件旁的空隙（离零件至少 2 mm），每个编号都有小箭头指向对应零件，
 绿色“零件编号”图层。零件间距太小时部分零件可能放不下编号，会在左侧提示。</li>
-<li>零件的切割线统一放在黑色“切割”图层；原文件中其他图层（如刻线）保持原图层和颜色。字体为单线字。</li>
+<li>零件外轮廓，以及和外轮廓图层、颜色都相同的线（如减重孔），统一放在黑色“切割”图层。
+其他线保持原图层和颜色，例如用不同图层或不同颜色画的刻线——和外轮廓同图层、但颜色不同的线也按刻线处理，不会被切穿。字体为单线字。</li>
 </ul>
 
 <h3>当前版本限制</h3>
@@ -771,14 +772,26 @@ class Main(QMainWindow):
                     ca, sa = math.cos(math.radians(r)), math.sin(math.radians(r))
                     tp += [(u * ca - v * sa + x, u * sa + v * ca + y) for u, v in P.tab_points(part, tabs.get(id(part)))]
                 out.append(dict(items=items, marks=mk, nums=nm, tabpts=tp))
-            self.post = dict(sheets=out, tabs=tabs)
+            used = list({id(self.byid[i]): self.byid[i] for pl in self.sheets for i, *_ in pl}.values())
+            for p in used: P.part_prims(p)
+            kept = sum(1 for p in used if p._kept); clash = [p.name for p in used if p._clash]
+            self.post = dict(sheets=out, tabs=tabs, clash=clash)
             msg = []
             if self.tab_on.isChecked():
                 msg.append(f'微连接 {sum(len(s["tabpts"]) for s in out)} 处')
                 if notab: msg.append(f'{notab} 种零件没有合适的直边，未加微连接')
             if self.num_on.isChecked() and miss: msg.append(f'{miss} 个零件旁边空间不足，未编号（可加大零件间距）')
-            if msg: self.info.setText('后处理：' + '；'.join(msg) + '。')
+            lines = ['后处理：' + '；'.join(msg) + '。'] if msg else []
+            if kept: lines.append(f'{kept} 种零件内部有和外轮廓同图层、但颜色不同的线，已按刻线处理：保留原图层和颜色，不放进“切割”层。')
+            if clash: lines.append(self.clash_text(clash))
+            if lines: self.info.setText('\n'.join(lines))
         finally: QApplication.restoreOverrideCursor()
+
+    @staticmethod
+    def clash_text(names):
+        s = '、'.join(names[:5]) + ('等' if len(names) > 5 else '')
+        return (f'注意：{s} 的切割线原来不是黑/白色，导出后统一成黑/白色（“切割”层），和零件上黑/白色的刻线颜色相同。'
+                'LightBurn、RDWorks 等按颜色区分加工的软件会把这些刻线一起切穿，请先把原图里的刻线改成别的颜色。')
 
     def draw_post(self, k, ox, oy):
         if not self.post or k >= len(self.post['sheets']): return
@@ -1041,7 +1054,10 @@ class Main(QMainWindow):
         except Exception as ex:
             if quiet: raise
             QMessageBox.critical(self, APP, f'导出失败：{ex}'); return
-        if not quiet: QMessageBox.information(self, APP, '已导出：\n' + '\n'.join(out))
+        if quiet: return
+        clash = (self.post or {}).get('clash')
+        if clash: QMessageBox.warning(self, APP, '已导出：\n' + '\n'.join(out) + '\n\n' + self.clash_text(clash))
+        else: QMessageBox.information(self, APP, '已导出：\n' + '\n'.join(out))
 
     def closeEvent(self, e):
         self.save_cfg()
